@@ -11,7 +11,7 @@ class Decoder:
         self.model, self.model_type = load_model(model_path, device=device, **kwargs)
         self.device = device
         
-    def __call__(self, feature):
+    def __call__(self, feature, *, return_batch=False):
 
         if self.model_type == "onnx":
             pred = self.model.run(None, {"feature": feature})[0]
@@ -25,6 +25,6 @@ class Decoder:
         else:
             raise ValueError(f"Unsupported model type: {self.model_type}")
         
-        pred = np.transpose(pred[0], [1, 2, 0]).clip(0, 1) * 255    # [h, w, c]
+        pred = np.transpose(pred, [0, 2, 3, 1]).clip(0, 1) * 255
         
-        return pred
+        return pred if return_batch else pred[0]

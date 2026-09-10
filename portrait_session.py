@@ -20,7 +20,10 @@ from stream_pipeline_offline import StreamSDK
 
 
 class PortraitSession:
-    def __init__(self, models, device='mps', *, tensor_path=True, fast_mask=True):
+    def __init__(self, models, device='mps', *, tensor_path=True, fast_mask=True,
+                 render_batch_size=4, prepare_decoder=True):
+        if render_batch_size not in (1, 2, 4):
+            raise ValueError('Render batch size must be 1, 2, or 4')
         started = time.perf_counter()
         models = Path(models)
         torch.set_num_threads(4)
@@ -47,6 +50,14 @@ class PortraitSession:
             self.sdk = StreamSDK(str(path), str(models / 'ditto_pytorch'))
         self.sdk.audio2motion.lmdm.model.device = device
         self.sdk.warp_f3d.warp_net.model.dense_motion_network.use_mps_2d_mask = fast_mask and device == 'mps'
+        if prepare_decoder:
+            with torch.no_grad(), torch.autocast(device_type=device[:4], dtype=torch.float16):
+                self.sdk.decode_f3d.decoder.model.prepare_inference()
+            if device == 'mps':
+                # Convolution already runs in fp16 under autocast. Keep its fixed
+                # weights in that precision instead of recasting every batch.
+                self.sdk.decode_f3d.decoder.model.half()
+        self.render_batch_size = render_batch_size
         self.device, self.tensor_path = device, tensor_path
         self.source_key = self.source = self.feature = None
         self.load_seconds = time.perf_counter() - started
@@ -138,27 +149,57 @@ class PortraitSession:
                     # Preserve the overlap and one frame of final smoothing lookahead.
                     stop = motion.shape[1] - sdk.audio2motion.overlap_v2 - sdk.audio2motion.smo_k_d // 2
                     finalized = sdk.audio2motion._smo(motion.copy(), 0, motion.shape[1])
-                    for driving in sdk.audio2motion.cvt_fmt(finalized[:, emitted:stop]):
+                    for batch in self.driving_batches(sdk.audio2motion.cvt_fmt(finalized[:, emitted:stop]), first=emitted == 0):
                         t = time.perf_counter()
-                        pixels = self.render(source_info, driving)
+                        images = self.render_batch(source_info, batch)
                         render_seconds += time.perf_counter() - t
                         first = first or time.perf_counter() - started
-                        yield pixels, bytes(pcm[emitted * 1920:(emitted + 1) * 1920])
-                        emitted += 1
+                        for pixels in images:
+                            yield pixels, bytes(pcm[emitted * 1920:(emitted + 1) * 1920])
+                            emitted += 1
             if ended and motion is not None:
                 finalized = sdk.audio2motion._smo(motion[:, :frame_count].copy(), 0, frame_count)
-                for driving in sdk.audio2motion.cvt_fmt(finalized[:, emitted:]):
+                for batch in self.driving_batches(sdk.audio2motion.cvt_fmt(finalized[:, emitted:]), first=emitted == 0):
                     t = time.perf_counter()
-                    pixels = self.render(source_info, driving)
+                    images = self.render_batch(source_info, batch)
                     render_seconds += time.perf_counter() - t
                     first = first or time.perf_counter() - started
-                    yield pixels, bytes(pcm[emitted * 1920:(emitted + 1) * 1920]).ljust(1920, b'\0')
-                    emitted += 1
+                    for pixels in images:
+                        yield pixels, bytes(pcm[emitted * 1920:(emitted + 1) * 1920]).ljust(1920, b'\0')
+                        emitted += 1
         self.metrics = dict(frames=emitted, video_seconds=emitted / 25, first_frame_seconds=first,
                             turn_seconds=time.perf_counter() - started, portrait_cached=cached,
                             portrait_seconds=prepared - started, motion_seconds=motion_seconds,
                             render_seconds=render_seconds, sampling_steps=sampling_steps,
-                            motion_profile=motion_profile)
+                            motion_profile=motion_profile, render_batch_size=self.render_batch_size)
+
+    def driving_batches(self, driving, *, first=False):
+        """Render the first frame immediately, then bounded groups without dropping frames."""
+        batch = []
+        for item in driving:
+            batch.append(item)
+            if first or len(batch) == self.render_batch_size:
+                yield batch
+                batch, first = [], False
+        if batch:
+            yield batch
+
+    def render_batch(self, source_info, driving):
+        if len(driving) == 1 or not self.tensor_path:
+            return [self.render(source_info, item) for item in driving]
+        sdk = self.sdk
+        # Stitching contains temporal state, so its order must stay sequential.
+        points = [sdk.motion_stitch(source_info, item) for item in driving]
+        x_s = np.concatenate([pair[0] for pair in points])
+        x_d = np.concatenate([pair[1] for pair in points])
+        feature = sdk.warp_f3d.warp_net(self.feature.expand(len(driving), -1, -1, -1, -1),
+                                       x_s, x_d, return_tensor=True)
+        crops = sdk.decode_f3d.decoder(feature, return_batch=True)
+        return [self.putback(crop) for crop in crops]
+
+    def putback(self, crop):
+        image = self.sdk.putback(self.source['img_rgb_lst'][0], crop, self.source['M_c2o_lst'][0])
+        return cv2.resize(image, (320, 320), interpolation=cv2.INTER_AREA).astype(np.uint8)
 
     def render(self, source_info, driving):
         sdk = self.sdk
@@ -168,5 +209,4 @@ class PortraitSession:
         else:
             feature = sdk.warp_f3d(self.feature, x_s, x_d)
         crop = sdk.decode_f3d(feature)
-        image = sdk.putback(self.source['img_rgb_lst'][0], crop, self.source['M_c2o_lst'][0])
-        return cv2.resize(image, (320, 320), interpolation=cv2.INTER_AREA).astype(np.uint8)
+        return self.putback(crop)

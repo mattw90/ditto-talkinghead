@@ -16,6 +16,13 @@ and license documentation follows below.
   The default is `original`; these limits have not established a perceptual
   quality improvement. Sampling defaults to 50; 20 and 10 are experimental.
 - Reset random sampling and motion history each turn, even when models are cached.
+- Prepare the inference-only decoder once: freeze eval spectral normalization,
+  combine SPADE gamma/beta convolutions, reuse resized conditioning within each
+  residual block, and retain Metal decoder weights in the fp16 precision already
+  used by autocast. This does not quantize the motion model or change its weights.
+- Render the first frame alone, then up to four frames together. Stateful motion
+  stitching remains sequential; every frame retains its matching audio. Set
+  `render_batch_size=1` or `2` on `PortraitSession` to use smaller batches.
 
 ```python
 from portrait_session import PortraitSession
@@ -37,6 +44,13 @@ In an M5 Max 320px six-second control, native frame rendering took about 18s;
 the rewritten mask reduced it to about 9.2s. These are individual local runs,
 not a sustained real-time or distortion-free claim. Auxiliary model dependencies
 and installation instructions remain those of the upstream project.
+
+The subsequent decoder/batching pass preserved all 150 and 422 control frames,
+with raw pixel differences at most 1/255 against the preceding optimized renderer.
+Its gains are modest and workload dependent; generation still trails playback.
+`prepare_decoder=False, render_batch_size=1` retains the preceding inference path
+for comparisons. Prepared decoder instances are disposable inference models:
+recreate one to reload a checkpoint or train. No trained checkpoint is overwritten.
 
 ---
 

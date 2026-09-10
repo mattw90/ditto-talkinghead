@@ -74,6 +74,8 @@ def session():
               'eye_open_lst': [np.ones((1, 2))], 'eye_ball_lst': [np.zeros((1, 6))]}
     motion = Audio2Motion.__new__(Audio2Motion); motion.lmdm = MotionModel()
     obj = PortraitSession.__new__(PortraitSession)
+    obj.render_batch_size = 4
+    obj.tensor_path = False
     obj.prepare = lambda _: True
     obj.source = source
     obj.cpu_rng = torch.get_rng_state(); obj.device_rng = None; obj.device = 'cpu'
@@ -104,3 +106,50 @@ def test_frames_are_emitted_before_all_audio_is_consumed():
     next(iterator)
     assert len(consumed) < 24
     iterator.close()
+
+
+def test_prepared_decoder_preserves_output_rng_and_is_idempotent():
+    from core.models.modules.spade_generator import SPADEDecoder
+    torch.manual_seed(9)
+    model = SPADEDecoder(max_features=8, block_expansion=2, out_channels=2,
+                         num_down_blocks=1).double().eval()
+    value = torch.randn(2, 4, 5, 7, dtype=torch.float64)
+    with torch.no_grad():
+        expected = model(value)
+        rng = torch.get_rng_state().clone()
+        model.prepare_inference()
+        assert torch.equal(rng, torch.get_rng_state())
+        torch.testing.assert_close(model(value), expected, rtol=1e-10, atol=1e-10)
+        model.prepare_inference()
+        torch.testing.assert_close(model(value), expected, rtol=1e-10, atol=1e-10)
+    with pytest.raises(ValueError, match='eval mode'):
+        model.train().prepare_inference()
+
+
+@pytest.mark.parametrize('size', [1, 2, 4])
+def test_render_batches_deliver_first_immediately_and_keep_partial_tail(size):
+    obj = session()
+    obj.render_batch_size = size
+    batches = list(obj.driving_batches(range(10), first=True))
+    assert batches[0] == [0]
+    assert max(map(len, batches)) <= size
+    assert [item for batch in batches for item in batch] == list(range(10))
+
+
+def test_batched_render_stitches_in_order_and_pairs_every_crop():
+    obj = session()
+    obj.tensor_path = True
+    obj.feature = torch.ones(1, 1, 1, 1, 1)
+    stitched = []
+    def stitch(source, item):
+        stitched.append(item)
+        return np.zeros((1, 1, 3)), np.full((1, 1, 3), sum(stitched))
+    def warp(feature, source, driving, **kwargs):
+        assert feature.shape[0] == source.shape[0] == driving.shape[0] == 3
+        return driving[:, 0, 0]
+    obj.sdk.motion_stitch = stitch
+    obj.sdk.warp_f3d = SimpleNamespace(warp_net=warp)
+    obj.sdk.decode_f3d = SimpleNamespace(decoder=lambda feature, **kwargs: feature)
+    obj.putback = lambda crop: crop * 10
+    assert obj.render_batch({}, [1, 2, 3]) == [10, 30, 60]
+    assert stitched == [1, 2, 3]

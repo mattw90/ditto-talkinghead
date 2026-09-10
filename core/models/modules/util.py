@@ -264,13 +264,34 @@ class SPADE(nn.Module):
             nn.ReLU())
         self.mlp_gamma = nn.Conv2d(nhidden, norm_nc, kernel_size=3, padding=1)
         self.mlp_beta = nn.Conv2d(nhidden, norm_nc, kernel_size=3, padding=1)
+        self.mlp_gamma_beta = None
+
+    def prepare_inference(self):
+        """Concatenate independent output channels; retain all learned weights."""
+        if self.training:
+            raise ValueError('SPADE inference preparation requires eval mode')
+        if self.mlp_gamma_beta is None:
+            gamma, beta = self.mlp_gamma, self.mlp_beta
+            # Construction must not advance the speech model's sampling RNG.
+            with torch.random.fork_rng(devices=[]):
+                fused = nn.Conv2d(gamma.in_channels, 2 * gamma.out_channels, 3, padding=1)
+            fused = fused.to(device=gamma.weight.device, dtype=gamma.weight.dtype)
+            with torch.no_grad():
+                fused.weight.copy_(torch.cat((gamma.weight, beta.weight)))
+                fused.bias.copy_(torch.cat((gamma.bias, beta.bias)))
+            self.mlp_gamma_beta = fused.eval().requires_grad_(False)
+            self.mlp_gamma = self.mlp_beta = None
 
     def forward(self, x, segmap):
         normalized = self.param_free_norm(x)
-        segmap = F.interpolate(segmap, size=x.size()[2:], mode='nearest')
+        if segmap.shape[2:] != x.shape[2:]:
+            segmap = F.interpolate(segmap, size=x.size()[2:], mode='nearest')
         actv = self.mlp_shared(segmap)
-        gamma = self.mlp_gamma(actv)
-        beta = self.mlp_beta(actv)
+        if self.mlp_gamma_beta is None:
+            gamma = self.mlp_gamma(actv)
+            beta = self.mlp_beta(actv)
+        else:
+            gamma, beta = self.mlp_gamma_beta(actv).chunk(2, dim=1)
         out = normalized * (1 + gamma) + beta
         return out
 
@@ -300,6 +321,9 @@ class SPADEResnetBlock(nn.Module):
             self.norm_s = SPADE(fin, label_nc)
 
     def forward(self, x, seg1):
+        # All three normalizations use the same conditioning at this resolution.
+        if seg1.shape[2:] != x.shape[2:]:
+            seg1 = F.interpolate(seg1, size=x.shape[2:], mode='nearest')
         x_s = self.shortcut(x, seg1)
         dx = self.conv_0(self.actvn(self.norm_0(x, seg1)))
         dx = self.conv_1(self.actvn(self.norm_1(dx, seg1)))

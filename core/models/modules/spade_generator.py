@@ -7,7 +7,7 @@ Spade decoder(G) defined in the paper, which input the warped feature to generat
 import torch
 from torch import nn
 import torch.nn.functional as F
-from .util import SPADEResnetBlock
+from .util import SPADEResnetBlock, SPADE
 
 
 class SPADEDecoder(nn.Module):
@@ -80,6 +80,22 @@ class SPADEDecoder(nn.Module):
         x = torch.sigmoid(x)  # Bx3xHxW
 
         return x
+
+    def prepare_inference(self):
+        """Freeze eval-only spectral normalization and combine SPADE outputs.
+
+        Call after loading the checkpoint, inside the forward precision context.
+        This session model is inference-only; reload before training or reloading
+        a checkpoint. Repeated preparation is harmless.
+        """
+        if self.training:
+            raise ValueError('Decoder inference preparation requires eval mode')
+        for module in list(self.modules()):
+            if hasattr(module, 'weight_orig'):
+                nn.utils.remove_spectral_norm(module)
+            if isinstance(module, SPADE):
+                module.prepare_inference()
+        return self
     
     def load_model(self, ckpt_path):
         self.load_state_dict(torch.load(ckpt_path, map_location=lambda storage, loc: storage))
