@@ -75,6 +75,7 @@ def session():
     motion = Audio2Motion.__new__(Audio2Motion); motion.lmdm = MotionModel()
     obj = PortraitSession.__new__(PortraitSession)
     obj.render_batch_size = 4
+    obj.render_backend = 'torch'
     obj.tensor_path = False
     obj.prepare = lambda _: True
     obj.source = source
@@ -136,8 +137,10 @@ def test_render_batches_deliver_first_immediately_and_keep_partial_tail(size):
     assert [item for batch in batches for item in batch] == list(range(10))
 
 
-def test_batched_render_stitches_in_order_and_pairs_every_crop():
+@pytest.mark.parametrize('backend', ['torch', 'mlx'])
+def test_batched_render_stitches_in_order_and_pairs_every_crop(backend):
     obj = session()
+    obj.render_backend = backend
     obj.tensor_path = True
     obj.feature = torch.ones(1, 1, 1, 1, 1)
     stitched = []
@@ -150,6 +153,7 @@ def test_batched_render_stitches_in_order_and_pairs_every_crop():
     obj.sdk.motion_stitch = stitch
     obj.sdk.warp_f3d = SimpleNamespace(warp_net=warp)
     obj.sdk.decode_f3d = SimpleNamespace(decoder=lambda feature, **kwargs: feature)
+    obj.mlx_renderer = SimpleNamespace(render=lambda source, driving: driving[:, 0, 0])
     obj.putback = lambda crop: crop * 10
     assert obj.render_batch({}, [1, 2, 3]) == [10, 30, 60]
     assert stitched == [1, 2, 3]

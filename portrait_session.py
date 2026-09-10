@@ -1,4 +1,4 @@
-"""Reusable PyTorch portrait renderer with incremental audio and frame output.
+"""Reusable PyTorch/MLX portrait renderer with incremental audio and frame output.
 
 Uses the released offline motion checkpoint with its original overlapping windows.
 Only finalized motion is emitted; streaming does not change the checkpoint or
@@ -21,9 +21,14 @@ from stream_pipeline_offline import StreamSDK
 
 class PortraitSession:
     def __init__(self, models, device='mps', *, tensor_path=True, fast_mask=True,
-                 render_batch_size=4, prepare_decoder=True):
+                 render_batch_size=4, prepare_decoder=True, render_backend='torch'):
         if render_batch_size not in (1, 2, 4):
             raise ValueError('Render batch size must be 1, 2, or 4')
+        if render_backend not in ('torch', 'mlx'):
+            raise ValueError('Render backend must be torch or mlx')
+        if render_backend == 'mlx' and device != 'mps':
+            raise ValueError('The MLX backend requires Apple Silicon')
+        self.render_backend = render_backend
         started = time.perf_counter()
         models = Path(models)
         torch.set_num_threads(4)
@@ -38,6 +43,8 @@ class PortraitSession:
             component['device'] = device if name in {
                 'appearance_extractor_cfg', 'motion_extractor_cfg', 'stitch_network_cfg',
                 'warp_network_cfg', 'decoder_cfg'} else 'cpu'
+            if render_backend == 'mlx' and name in ('warp_network_cfg', 'decoder_cfg'):
+                component['device'] = 'cpu'
         config['audio2motion_cfg']['device'] = device
         config['base_cfg']['landmark478_cfg'] = {
             'device': 'cpu', 'force_ori_type': False,
@@ -50,13 +57,19 @@ class PortraitSession:
             self.sdk = StreamSDK(str(path), str(models / 'ditto_pytorch'))
         self.sdk.audio2motion.lmdm.model.device = device
         self.sdk.warp_f3d.warp_net.model.dense_motion_network.use_mps_2d_mask = fast_mask and device == 'mps'
-        if prepare_decoder:
+        if prepare_decoder and render_backend == 'torch':
             with torch.no_grad(), torch.autocast(device_type=device[:4], dtype=torch.float16):
                 self.sdk.decode_f3d.decoder.model.prepare_inference()
             if device == 'mps':
                 # Convolution already runs in fp16 under autocast. Keep its fixed
                 # weights in that precision instead of recasting every batch.
                 self.sdk.decode_f3d.decoder.model.half()
+        if render_backend == 'mlx':
+            from core.models.mlx_renderer import MlxFrameRenderer
+            self.mlx_renderer = MlxFrameRenderer(models)
+            # One image-rendering backbone. Ditto's small motion/registration
+            # networks continue to use the existing PyTorch implementation.
+            del self.sdk.warp_f3d, self.sdk.decode_f3d
         self.render_batch_size = render_batch_size
         self.device, self.tensor_path = device, tensor_path
         self.source_key = self.source = self.feature = None
@@ -72,7 +85,11 @@ class PortraitSession:
             self.source = self.sdk.avatar_registrar(str(portrait), max_dim=512, n_frames=1,
                                                    crop_scale=2.3, crop_vx_ratio=0, crop_vy_ratio=-.125)
             feature = self.source['f_s_lst'][0]
-            self.feature = torch.as_tensor(feature, device=self.device) if self.tensor_path else feature
+            if self.render_backend == 'mlx':
+                self.mlx_renderer.prepare(feature)
+                self.feature = None
+            else:
+                self.feature = torch.as_tensor(feature, device=self.device) if self.tensor_path else feature
             self.source_key = key
         return cached
 
@@ -171,7 +188,8 @@ class PortraitSession:
                             turn_seconds=time.perf_counter() - started, portrait_cached=cached,
                             portrait_seconds=prepared - started, motion_seconds=motion_seconds,
                             render_seconds=render_seconds, sampling_steps=sampling_steps,
-                            motion_profile=motion_profile, render_batch_size=self.render_batch_size)
+                            motion_profile=motion_profile, render_batch_size=self.render_batch_size,
+                            render_backend=self.render_backend)
 
     def driving_batches(self, driving, *, first=False):
         """Render the first frame immediately, then bounded groups without dropping frames."""
@@ -185,6 +203,11 @@ class PortraitSession:
             yield batch
 
     def render_batch(self, source_info, driving):
+        if self.render_backend == 'mlx':
+            points = [self.sdk.motion_stitch(source_info, item) for item in driving]
+            crops = self.mlx_renderer.render(np.concatenate([pair[0] for pair in points]),
+                                              np.concatenate([pair[1] for pair in points]))
+            return [self.putback(crop) for crop in crops]
         if len(driving) == 1 or not self.tensor_path:
             return [self.render(source_info, item) for item in driving]
         sdk = self.sdk
@@ -202,6 +225,8 @@ class PortraitSession:
         return cv2.resize(image, (320, 320), interpolation=cv2.INTER_AREA).astype(np.uint8)
 
     def render(self, source_info, driving):
+        if self.render_backend == 'mlx':
+            return self.render_batch(source_info, [driving])[0]
         sdk = self.sdk
         x_s, x_d = sdk.motion_stitch(source_info, driving)
         if self.tensor_path:

@@ -52,6 +52,32 @@ Its gains are modest and workload dependent; generation still trails playback.
 for comparisons. Prepared decoder instances are disposable inference models:
 recreate one to reload a checkpoint or train. No trained checkpoint is overwritten.
 
+## Optional MLX image renderer
+
+On Apple Silicon, install `mlx==0.32.2 mlx-metal==0.32.2` alongside the existing
+dependencies and construct `PortraitSession(..., render_backend='mlx')`.
+PyTorch/MPS remains the default. Ditto's motion, registration and stitching are
+unchanged; only the image warper/decoder use MLX. This is not an all-MLX pipeline.
+The first load converts the two installed PyTorch image checkpoints to local NPZ
+files under `models/ditto/mlx`; a source-hash receipt invalidates stale conversion.
+It downloads no extra model and performs no training.
+
+The MLX rendering core derives from
+[FasterLivePortrait-MLX](https://github.com/ivanfioravanti/fasterliveportrait-mlx)
+at `d5361f4806c14fe2051eecb1dd5a89930f46db0d`. Attribution and its MIT license are
+in `core/models/mlx_modules/`. This fork adds full-precision facial geometry,
+scaled fp16 residual convolutions to avoid overflowing intermediate sums, fused
+SPADE gamma/beta, shared conditioning resize, and immutable portrait/batch caches.
+Normalization reductions stay fp32. All finalized motion frames are rendered;
+temporal warp reuse is disabled.
+
+The local M5 Max controls show much closer pixel agreement with the PyTorch
+renderer than stock MLX's default bf16 precision, with modest throughput gains
+over its single-frame default. Batching stock MLX also speeds it up. The optimized
+PyTorch/MPS backend remains faster overall; MLX is experimental, not a claim of
+sustained real time or removal of the model's existing facial artifacts. Regression
+tests for MLX arithmetic and cache invalidation skip when MLX is not installed.
+
 ---
 
 <h2 align='center'>Ditto: Motion-Space Diffusion for Controllable Realtime Talking Head Synthesis</h2>
