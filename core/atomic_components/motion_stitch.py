@@ -61,10 +61,10 @@ def ctrl_vad(x_d_info, dst, alpha):
     exp_dst = dst["exp"]
 
     _lip = [6, 12, 14, 17, 19, 20]
-    _a1 = np.zeros((21, 3), dtype=np.float32)
+    _a1 = np.ones((21, 3), dtype=np.float32)
     _a1[_lip] = alpha
     _a1 = _a1.reshape(1, -1)
-    x_d_info["exp"] = exp * alpha + exp_dst * (1 - alpha)
+    x_d_info["exp"] = exp * _a1 + exp_dst * (1 - _a1)
 
     return x_d_info
     
@@ -314,6 +314,7 @@ class MotionStitch:
         d0=None,
         ch_info=None,
         overall_ctrl_info=None,
+        motion_limits=None,
     ):
         self.is_image_flag = is_image_flag
         if use_d_keys is None:
@@ -387,6 +388,8 @@ class MotionStitch:
         else:
             self.scale_ratio = 1
 
+        from .motion_bounds import MotionBounds
+        self.motion_bounds = MotionBounds(x_s_info, **motion_limits) if motion_limits else None
         self.overall_ctrl_info = overall_ctrl_info
 
         self.d0 = d0
@@ -473,6 +476,9 @@ class MotionStitch:
                 pitch_s = bin66_to_degree(x_s_info['pitch']).item()
                 self.pose_s = [yaw_s, pitch_s]
             x_d_info = _fix_gaze(self.pose_s, x_d_info)
+
+        if self.motion_bounds is not None:
+            x_d_info = self.motion_bounds(x_d_info)
 
         if self.x_s is not None:
             x_s = self.x_s

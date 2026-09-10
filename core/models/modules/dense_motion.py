@@ -19,6 +19,7 @@ class DenseMotionNetwork(nn.Module):
         self.compress = nn.Conv3d(feature_channel, compress, kernel_size=1)  # 0.8G
         self.norm = nn.BatchNorm3d(compress, affine=True)
         self.num_kp = num_kp
+        self.use_mps_2d_mask = False
         self.flag_estimate_occlusion_map = estimate_occlusion_map
 
         if self.flag_estimate_occlusion_map:
@@ -85,7 +86,11 @@ class DenseMotionNetwork(nn.Module):
 
         prediction = self.hourglass(input)
 
-        mask = self.mask(prediction)
+        if self.use_mps_2d_mask:
+            from .conv3d_mps import conv3d_as_conv2d
+            mask = conv3d_as_conv2d(prediction, self.mask)
+        else:
+            mask = self.mask(prediction)
         mask = F.softmax(mask, dim=1)  # (bs, 1+num_kp, d=16, h=64, w=64)
         out_dict['mask'] = mask
         mask = mask.unsqueeze(2)                                   # (bs, num_kp+1, 1, d, h, w)

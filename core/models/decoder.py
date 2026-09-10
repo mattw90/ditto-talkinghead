@@ -21,7 +21,7 @@ class Decoder:
             pred = self.model.buffer["output"][0].copy()
         elif self.model_type == 'pytorch':
             with torch.no_grad(), torch.autocast(device_type=self.device[:4], dtype=torch.float16, enabled=True):
-                pred = self.model(torch.from_numpy(feature).to(self.device)).float().cpu().numpy()
+                pred = self.model(torch.as_tensor(feature, device=self.device)).float().cpu().numpy()
         else:
             raise ValueError(f"Unsupported model type: {self.model_type}")
         

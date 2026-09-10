@@ -44,7 +44,7 @@ def create_model(
     module = getattr(importlib.import_module(package_name, __package__), module_name)
     # from <package_name> import <module_name>
 
-    model = module(**kwargs)
+    model = module(device=device, **kwargs) if module_name == "LMDM" else module(**kwargs)
     model.load_model(model_path).to(device)
     return model
 
@@ -60,5 +60,5 @@ def load_force_ori_type(
     import importlib
 
     module = getattr(importlib.import_module(package_name, __package__), module_name)
-    model = module(**kwargs)
+    model = module(**kwargs) if module_name == "Landmark478" else module(device=device, **kwargs)
     return model

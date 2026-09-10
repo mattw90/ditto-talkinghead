@@ -11,7 +11,7 @@ class WarpNetwork:
         self.model, self.model_type = load_model(model_path, device=device, **kwargs)
         self.device = device
 
-    def __call__(self, feature_3d, kp_source, kp_driving):
+    def __call__(self, feature_3d, kp_source, kp_driving, *, return_tensor=False):
         """
         feature_3d: np.ndarray, shape (1, 32, 16, 64, 64)
         kp_source | kp_driving: np.ndarray, shape (1, 21, 3)
@@ -25,11 +25,13 @@ class WarpNetwork:
         elif self.model_type == 'pytorch':
             with torch.no_grad(), torch.autocast(device_type=self.device[:4], dtype=torch.float16, enabled=True):
                 pred = self.model(
-                    torch.from_numpy(feature_3d).to(self.device), 
-                    torch.from_numpy(kp_source).to(self.device), 
-                    torch.from_numpy(kp_driving).to(self.device)
-                ).float().cpu().numpy()
+                    torch.as_tensor(feature_3d, device=self.device),
+                    torch.as_tensor(kp_source, device=self.device),
+                    torch.as_tensor(kp_driving, device=self.device)
+                ).float()
+                if not return_tensor:
+                    pred = pred.cpu().numpy()
         else:
             raise ValueError(f"Unsupported model type: {self.model_type}")
-        
+
         return pred

@@ -1,3 +1,45 @@
+# Mac streaming fork of Ditto
+
+This fork adds a reusable `PortraitSession` for the existing released PyTorch
+weights. No model training or checkpoint changes are involved. Upstream release
+and license documentation follows below.
+
+- Cache the loaded models and a single portrait's appearance/registration.
+- Accept an iterator of 24 kHz mono PCM16 chunks; yield `(RGB frame, PCM)` pairs.
+- Use the original overlapping motion windows, emitting only finalized frames.
+- Keep appearance and warped features on Metal between rendering stages.
+- Execute the expensive 7x7x7 mask convolution as a batched 2D convolution on MPS,
+  retaining the same weights and padding. CPU float64 equivalence tests cover
+  depth boundaries and batches. Metal accumulation differs slightly: the six-second
+  control differed by at most one RGB level (0–255), before video compression.
+- Offer optional portrait-relative motion limits (`motion_profile='bounded'`).
+  The default is `original`; these limits have not established a perceptual
+  quality improvement. Sampling defaults to 50; 20 and 10 are experimental.
+- Reset random sampling and motion history each turn, even when models are cached.
+
+```python
+from portrait_session import PortraitSession
+session = PortraitSession('/path/to/models/ditto', device='mps')
+for rgb, pcm24k in session.frames('/path/to/portrait.png', pcm_chunk_iterator):
+    # Encode or display the frame together with its matching audio samples.
+    pass
+```
+
+The iterator retains at most a 120-second turn. It waits for the model's original
+80-feature-frame window and audio right context before the first non-final block;
+this is bounded lookahead, not zero-latency synthesis. The same session is serial:
+finish or discard a turn before starting another. The service owns process
+cancellation and memory release when changing renderers.
+
+`PYTHONPATH=. python -m pytest tests -q` checks motion bounds, lip-only silence
+control, convolution equivalence, audio chunk boundaries and early frame delivery.
+In an M5 Max 320px six-second control, native frame rendering took about 18s;
+the rewritten mask reduced it to about 9.2s. These are individual local runs,
+not a sustained real-time or distortion-free claim. Auxiliary model dependencies
+and installation instructions remain those of the upstream project.
+
+---
+
 <h2 align='center'>Ditto: Motion-Space Diffusion for Controllable Realtime Talking Head Synthesis</h2>
 
 <div align='center'>
